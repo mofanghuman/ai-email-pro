@@ -9,7 +9,10 @@
   ✅ SMTP邮件发送 (支持阿里云企业邮箱/Gmail/Outlook等)
   ✅ 历史记录 / 导出TXT+Word / 一键复制
   
-  导出日期: 2026-06-09
+  安全说明:
+  ⚠️  所有敏感配置（API Key、数据库凭证）均通过环境变量/Streamlit Secrets 加载
+  ⚠️  请勿在代码中硬编码任何密钥
+  
   运行: streamlit run AI_ForeignTrade_Email_Pro.py
 ================================================================================
 """
@@ -19,6 +22,13 @@ from typing import List, Dict, Optional, Any, Tuple
 import json
 import os
 import re
+
+# ====== 加载环境变量 / Streamlit Secrets ======
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # Streamlit Cloud 使用 st.secrets，无需 dotenv
 import sys
 import hashlib
 import hmac
@@ -42,9 +52,22 @@ from docx import Document
 # ====================== 🔐 Supabase 认证模块 ===============================
 # ============================================================================
 
-# 加载环境变量
-SUPABASE_URL = "https://efhdtxvhsqbkyzmijbhh.supabase.co"
-SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVmaGR0eHZoc3Fia3l6bWlqYmhoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODA5OTI1NTMsImV4cCI6MjA5NjU2ODU1M30.qSCJl3rTPFU0ykEh1aQOaGIsbGc-WCpFVnz-Q14lvGE"
+# 从环境变量 / Streamlit Secrets 加载敏感配置（禁止硬编码）
+def _get_secret(key: str, default: str = "") -> str:
+    """优先环境变量 -> Streamlit Secrets -> 默认值"""
+    env_val = os.environ.get(key, "")
+    if env_val:
+        return env_val
+    try:
+        secrets_val = st.secrets.get(key, "")
+        if secrets_val:
+            return secrets_val
+    except Exception:
+        pass
+    return default
+
+SUPABASE_URL = _get_secret("SUPABASE_URL")
+SUPABASE_ANON_KEY = _get_secret("SUPABASE_ANON_KEY")
 
 try:
     from supabase import create_client, Client
@@ -83,7 +106,7 @@ class AuthManager:
     
     @staticmethod
     def login(email: str, password: str) -> Tuple[bool, str]:
-        """用户登录（带重试机制）"""
+        """用户登录（带重试机制，profile查询失败不阻塞登录）"""
         import time as _time
         
         sb = get_supabase_client()
@@ -101,11 +124,15 @@ class AuthManager:
                     st.session_state.user_email = response.user.email
                     st.session_state.user_id = response.user.id
                     
-                    # 获取用户profile（含管理员权限）
-                    profile = sb.table('user_profiles').select('*').eq('id', response.user.id).execute()
-                    if profile.data:
-                        st.session_state.user_profile = profile.data[0]
-                        st.session_state.is_admin = profile.data[0].get('is_admin', False)
+                    # 尝试获取用户profile（含管理员权限），失败不阻塞登录
+                    try:
+                        profile = sb.table('user_profiles').select('*').eq('id', response.user.id).execute()
+                        if profile.data:
+                            st.session_state.user_profile = profile.data[0]
+                            st.session_state.is_admin = profile.data[0].get('is_admin', False)
+                    except Exception as profile_err:
+                        # RLS策略问题等不影响正常登录，记录日志即可
+                        print(f"[WARN] 获取user_profile失败(不影响登录): {profile_err}")
                     
                     # 强制刷新session确保状态保存
                     st.session_state._login_time = _time.time()
@@ -668,10 +695,21 @@ _security = SecurityManager()
 # ============================================================================
 
 class AppConfig:
-    """全局配置类"""
-    API_KEY: str = "sk-2782908a957b4d51aec514608351396c"
-    BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    MODEL_NAME: str = "qwen-plus"
+    """全局配置类（敏感值从环境变量/Streamlit Secrets加载，不硬编码）"""
+    # ⚠️ 以下字段使用 _get_secret() 动态读取，禁止在此硬编码真实值
+    _API_KEY: str = ""
+    _BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    _MODEL_NAME: str = "qwen-plus"
+
+    @classmethod
+    def _init_from_env(cls):
+        """从环境变量 / Streamlit Secrets 加载配置（首次调用时自动执行）"""
+        if not cls._API_KEY:
+            cls._API_KEY = _get_secret("AI_EMAIL_API_KEY")
+        if cls._BASE_URL == "https://dashscope.aliyuncs.com/compatible-mode/v1":
+            cls._BASE_URL = _get_secret("AI_EMAIL_BASE_URL", cls._BASE_URL)
+        if cls._MODEL_NAME == "qwen-plus":
+            cls._MODEL_NAME = _get_secret("AI_EMAIL_MODEL_NAME", cls._MODEL_NAME)
 
     # SMTP 配置 (邮件发送)
     SMTP_HOST: str = ""
@@ -687,21 +725,30 @@ class AppConfig:
 
     @classmethod
     def get_api_key(cls) -> str:
+        """获取 API Key（环境变量 > 加密文件 > 报错提示用户配置）"""
+        cls._init_from_env()
+        if cls._API_KEY:
+            return cls._API_KEY
         env_key = os.environ.get('AI_EMAIL_API_KEY', '')
         if env_key:
             return env_key
         encrypted_key = cls._load_encrypted_key()
         if encrypted_key:
             return encrypted_key
-        return cls.API_KEY
+        # 不再硬编码兜底，提示用户配置
+        raise ValueError(
+            "❌ 未配置 AI API Key！请设置环境变量 AI_EMAIL_API_KEY 或在 Streamlit Cloud 中配置 Secrets"
+        )
 
     @classmethod
     def get_base_url(cls) -> str:
-        return cls.BASE_URL
+        cls._init_from_env()
+        return cls._BASE_URL
 
     @classmethod
     def get_model_name(cls) -> str:
-        return cls.MODEL_NAME
+        cls._init_from_env()
+        return cls._MODEL_NAME
 
     @classmethod
     def _load_encrypted_key(cls) -> Optional[str]:
