@@ -83,27 +83,42 @@ class AuthManager:
     
     @staticmethod
     def login(email: str, password: str) -> Tuple[bool, str]:
-        """用户登录"""
+        """用户登录（带重试机制）"""
+        import time as _time
+        
         sb = get_supabase_client()
         if not sb:
             return False, "Supabase 客户端不可用，请安装 supabase 库"
-        try:
-            response = sb.auth.sign_in_with_password({"email": email, "password": password})
-            if response.user:
-                st.session_state.user = response.user
-                st.session_state.user_email = response.user.email
-                st.session_state.user_id = response.user.id
-                
-                # 获取用户profile
-                profile = sb.table('user_profiles').select('*').eq('id', response.user.id).execute()
-                if profile.data:
-                    st.session_state.user_profile = profile.data[0]
-                    st.session_state.is_admin = profile.data[0].get('is_admin', False)
-                
-                return True, "登录成功"
-            return False, "登录失败"
-        except Exception as e:
-            return False, f"登录失败: {str(e)}"
+        
+        # 重试最多3次（解决Streamlit Cloud冷启动延迟问题）
+        max_retries = 3
+        last_error = ""
+        for attempt in range(max_retries):
+            try:
+                response = sb.auth.sign_in_with_password({"email": email, "password": password})
+                if response.user:
+                    st.session_state.user = response.user
+                    st.session_state.user_email = response.user.email
+                    st.session_state.user_id = response.user.id
+                    
+                    # 获取用户profile（含管理员权限）
+                    profile = sb.table('user_profiles').select('*').eq('id', response.user.id).execute()
+                    if profile.data:
+                        st.session_state.user_profile = profile.data[0]
+                        st.session_state.is_admin = profile.data[0].get('is_admin', False)
+                    
+                    # 强制刷新session确保状态保存
+                    st.session_state._login_time = _time.time()
+                    
+                    return True, "登录成功"
+                else:
+                    last_error = "邮箱或密码错误"
+            except Exception as e:
+                last_error = str(e)
+                if attempt < max_retries - 1:
+                    _time.sleep(1)  # 等待1秒后重试
+        
+        return False, f"登录失败: {last_error}"
     
     @staticmethod
     def register(email: str, password: str, display_name: str = "") -> Tuple[bool, str]:
@@ -1524,9 +1539,20 @@ class UIManager:
     def render_main_content(self, sidebar_config: Dict[str, Any]) -> None:
         """主内容区 - 多Tab: 单封邮件 + 群发管理 + 管理后台(仅管理员)"""
         
+        # 保险机制：如果已登录但 is_admin 未设置，从数据库重新读取
+        if AuthManager.is_authenticated() and not st.session_state.get('is_admin', False):
+            sb = get_supabase_client()
+            if sb and st.session_state.get('user_id'):
+                try:
+                    profile = sb.table('user_profiles').select('is_admin').eq('id', st.session_state.user_id).execute()
+                    if profile.data and profile.data[0].get('is_admin'):
+                        st.session_state.is_admin = True
+                except Exception:
+                    pass
+        
         # 根据权限构建Tab列表
         tabs = ["✉️ 单封邮件", "📨 群发管理"]
-        if AuthManager.is_admin():
+        if st.session_state.get('is_admin', False):
             tabs.append("🛡️ 管理后台")
         
         active_tab = st.session_state.get('active_tab', tabs[0])
