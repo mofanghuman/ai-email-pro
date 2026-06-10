@@ -157,6 +157,14 @@ def render_login_page():
     """渲染登录页面"""
     st.set_page_config(page_title="AI外贸邮件 - 登录", page_icon="📧", layout="centered")
     
+    # 隐藏 Streamlit Cloud 右下角 GitHub 头像
+    st.markdown("""<style>
+        [data-testid="stAppViewBlockContainer"] [data-testid="stVerticalBlock"] > [style*="flex-direction: column"] > [data-testid="stVerticalBlock"]:last-child { display: none !important; }
+        [data-testid="stAppViewBlockContainer"] [data-testid="stToolbar"] + div[style*="position: fixed"] { display: none !important; }
+        .viewerBadge_container { display: none !important; }
+        iframe[title*="streamlit"] { display: none !important; }
+    </style>""", unsafe_allow_html=True)
+    
     # 居中显示Logo
     st.markdown("""
     <div style="text-align: center; padding: 20px;">
@@ -219,21 +227,12 @@ def render_login_page():
                             st.error(msg)
     
     st.divider()
-    st.caption("💡 默认无需注册，可直接在下方关闭登录后使用本地功能")
-    
-    # 添加跳过按钮
-    if st.button("🚪 跳过登录，使用本地模式", use_container_width=True):
-        st.session_state.skip_auth = True
-        st.session_state.auth_initialized = True
-        st.rerun()
+    st.caption("🔒 请使用注册账号登录，或点击上方「注册」创建新账号")
 
 
 def require_auth():
-    """认证守卫 - 检查登录状态"""
+    """认证守卫 - 强制登录"""
     AuthManager.init_session_state()
-    
-    if st.session_state.get('skip_auth'):
-        return True
     
     if not AuthManager.is_authenticated():
         render_login_page()
@@ -1404,6 +1403,12 @@ class UIManager:
         
         # 初始化认证会话
         AuthManager.init_session_state()
+        
+        # 隐藏 Streamlit Cloud 右下角 GitHub 头像（全局生效）
+        st.markdown("""<style>
+            .viewerBadge_container { display: none !important; }
+            [data-testid="stAppViewBlockContainer"] [data-testid="stVerticalBlock"] > [data-testid="stVerticalBlock"] > [data-testid="stVerticalBlock"]:last-child { display: none !important; }
+        </style>""", unsafe_allow_html=True)
 
         self.config = config
         self.ai_engine = ai_engine
@@ -1421,7 +1426,7 @@ class UIManager:
         """渲染侧边栏"""
         with st.sidebar:
             # ---- 用户信息区 ----
-            if AuthManager.is_authenticated() and not st.session_state.get('skip_auth'):
+            if AuthManager.is_authenticated():
                 with st.container(border=True):
                     user_col1, user_col2 = st.columns([3, 1])
                     with user_col1:
